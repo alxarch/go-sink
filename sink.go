@@ -1,7 +1,6 @@
 package sink
 
 import (
-	"log"
 	"sync/atomic"
 	"time"
 )
@@ -10,25 +9,44 @@ type Flusher interface {
 	Flush([]interface{}) error
 }
 
+type Pusher interface {
+	Push(interface{})
+}
+
 type FlushFunc func([]interface{}) error
 
 func (f FlushFunc) Flush(batch []interface{}) error {
 	return f(batch)
 }
 
-type Options struct {
-	BatchSize     int
-	FlushInterval time.Duration
-	Retries       int
-	Logger        *log.Logger
-}
+// type Options struct {
+// 	BatchSize     int
+// 	FlushInterval time.Duration
+// 	// Retries       int
+// }
+//
+// func (o *Options) Flags(f *flag.FlagSet, prefix string) {
+// 	if prefix = strings.Trim(prefix, "- "); prefix == "" {
+// 		prefix = "sink-"
+// 	} else {
+// 		prefix += "-"
+// 	}
+// 	f.DurationVar(&o.FlushInterval, prefix+"flush-interval", DefaultFlushInterval, "Sink flush interval")
+// 	// f.IntVar(&o.Retries, prefix+"flush-retries", 0, "Sink flush retries on error")
+// 	f.IntVar(&o.BatchSize, prefix+"batch-size", DefaultBatchSize, "Sink batch size")
+// }
+//
+// func (o *Options) Sink(f Flusher) *Sink {
+// 	return NewSink(f, *o)
+// }
 
 type Sink struct {
-	flush   FlushFunc
-	opts    Options
-	metrics Metrics
-	queue   chan interface{}
-	done    chan struct{}
+	f             Flusher
+	batchSize     int
+	flushInterval time.Duration
+	metrics       Metrics
+	queue         chan interface{}
+	done          chan struct{}
 }
 
 type Metrics struct {
@@ -43,26 +61,20 @@ func (s *Sink) Metrics() (m Metrics) {
 	return
 }
 
-func NewSink(f Flusher, opts Options) *Sink {
+func New(f Flusher, size int, interval time.Duration) *Sink {
 	if f == nil {
 		return nil
 	}
-	if opts.BatchSize <= 0 {
-		opts.BatchSize = DefaultBatchSize
-	}
-	if opts.FlushInterval <= 0 {
-		opts.FlushInterval = DefaultFlushInterval
-	}
-	if opts.Retries < 0 {
-		opts.Retries = 0
+	if size <= 0 {
+		size = DefaultBatchSize
 	}
 	s := &Sink{
-		flush: f.Flush,
-		opts:  opts,
-		queue: make(chan interface{}, 2*opts.BatchSize),
-		done:  make(chan struct{}),
+		f:             f,
+		batchSize:     size,
+		flushInterval: interval,
+		queue:         make(chan interface{}, 2*size+1),
 	}
-	go s.init()
+	go s.run()
 	return s
 }
 
@@ -72,33 +84,50 @@ func (s *Sink) Close() {
 	}
 }
 
-func (s *Sink) Add(x interface{}) {
+func (s *Sink) Push(x interface{}) {
 	s.queue <- x
 }
 
-func (s *Sink) init() {
-	tick := time.NewTicker(s.opts.FlushInterval)
-	batch := make([]interface{}, 0, s.opts.BatchSize)
+func (s *Sink) Flush(batch []interface{}) error {
+	return s.f.Flush(batch)
+}
+
+func (s *Sink) BatchSize() int {
+	return s.batchSize
+}
+
+func (s *Sink) FlushInterval() time.Duration {
+	return s.flushInterval
+}
+
+func (s *Sink) run() {
+	if s.done == nil {
+		s.done = make(chan struct{})
+	}
+	size := s.batchSize
+	batch := make([]interface{}, 0, size)
 	flush := func() {
 		if n := len(batch); n > 0 {
 			atomic.AddInt64(&s.metrics.FlushItems, int64(n))
 			// Non-blocking flush
 			go func(batch []interface{}) {
-				if err := s.Flush(batch); err != nil {
+				if err := s.f.Flush(batch); err != nil {
 					atomic.AddInt64(&s.metrics.FlushErrors, 1)
-					if s.opts.Logger != nil {
-						s.opts.Logger.Println(err)
-					}
 				}
 			}(batch)
-			batch = make([]interface{}, 0, s.opts.BatchSize)
+			batch = make([]interface{}, 0, size)
 		}
 	}
-	defer func() {
+	defer flush()
+	defer close(s.queue)
+	var tick *time.Ticker
+	if dt := s.flushInterval; dt > 0 {
+		tick = time.NewTicker(dt)
+		defer tick.Stop()
+	} else {
+		tick = time.NewTicker(time.Hour)
 		tick.Stop()
-		close(s.queue)
-		flush()
-	}()
+	}
 	for {
 		select {
 		case _ = <-s.done:
@@ -117,17 +146,6 @@ func (s *Sink) init() {
 	}
 }
 
-func (s *Sink) Flush(batch []interface{}) (err error) {
-	for r := 0; r <= s.opts.Retries; r++ {
-		if err = s.flush(batch); err == nil {
-			break
-		}
-	}
-
-	return
-}
-
 const (
-	DefaultFlushInterval = time.Second
-	DefaultBatchSize     = 1000
+	DefaultBatchSize = 100
 )

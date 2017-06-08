@@ -1,44 +1,12 @@
 package sink_test
 
 import (
-	"errors"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	sink "github.com/alxarch/go-sink"
 )
 
-func Test_Retries(t *testing.T) {
-	n := int64(0)
-	done := make(chan struct{})
-	once := new(sync.Once)
-	f := sink.FlushFunc(func(b []interface{}) error {
-		if atomic.AddInt64(&n, 1) > 2 {
-			once.Do(func() {
-				close(done)
-
-			})
-			return nil
-		}
-		return errors.New("ERR")
-	})
-	q := sink.NewSink(f, sink.Options{
-		BatchSize:     2,
-		Retries:       3,
-		FlushInterval: 5 * time.Second,
-	})
-	defer q.Close()
-
-	q.Add(1)
-	q.Add(1)
-	q.Add(1)
-	<-done
-	if n != 3 {
-		t.Error("No retries")
-	}
-}
 func Test_Queue(t *testing.T) {
 
 	done := make(chan []interface{}, 1)
@@ -46,14 +14,11 @@ func Test_Queue(t *testing.T) {
 		done <- b
 		return nil
 	})
-	q := sink.NewSink(f, sink.Options{
-		BatchSize:     2,
-		FlushInterval: 5 * time.Second,
-	})
+	q := sink.New(f, 2, 5*time.Second)
 
-	q.Add("a")
-	q.Add("b")
-	q.Add("c")
+	q.Push("a")
+	q.Push("b")
+	q.Push("c")
 	b := <-done
 	if len(b) != 2 {
 		t.Errorf("Invalid batch length %d", len(b))
