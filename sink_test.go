@@ -10,11 +10,14 @@ import (
 func Test_Queue(t *testing.T) {
 
 	done := make(chan []interface{}, 1)
-	f := sink.FlushFunc(func(b []interface{}) error {
+	f := sink.FlushFunc(func(b sink.Batch) error {
 		done <- b
 		return nil
 	})
-	q := sink.New(f, 2, 5*time.Second)
+	q := sink.New(f, sink.Options{
+		BatchSize:     2,
+		FlushInterval: 5 * time.Second,
+	})
 
 	q.Push("a")
 	q.Push("b")
@@ -35,11 +38,8 @@ func Test_Queue(t *testing.T) {
 	if metrics.FlushItems != 3 {
 		t.Errorf("Invalid stats items %d", metrics.FlushItems)
 	}
-	if metrics.FlushSize != 1 {
-		t.Error("Invalid stats fsize")
-	}
-	if metrics.FlushTick != 0 {
-		t.Error("Invalid stats ftick")
+	if metrics.Flush != 2 {
+		t.Errorf("Invalid stats fsize %d", metrics.Flush)
 	}
 	if metrics.FlushErrors != 0 {
 		t.Error("Invalid stats ferr")
